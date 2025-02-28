@@ -1,0 +1,33 @@
+package rpctest;
+
+struct I {
+    number_i uint16 = 0;
+}
+struct O {
+    number_o uint16 = 0;
+}
+struct T {
+    number_t uint16 = 0;
+}
+struct U {
+    number_u uint16 = 0;
+}
+
+service TestService {
+    NNNN();
+    NNNY() -> stream U;
+    NNYN(stream T);
+    NNYY(stream T) -> stream U;
+    NYNN() -> O;
+    NYNY() -> (O, stream U);
+    NYYN(stream T) -> O;
+    NYYY(stream T) -> (O, stream U);
+    YNNN(i I);
+    YNNY(i I) -> stream U;
+    YNYN(i I, stream T);
+    YNYY(i I, stream T) -> stream U;
+    YYNN(i I) -> O;
+    YYNY(i I) -> (O, stream U);
+    YYYN(i I, stream T) -> stream U;
+    YYYY(i I, stream T) -> (O, stream U);
+}
