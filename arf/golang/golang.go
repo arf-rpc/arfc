@@ -45,9 +45,9 @@ func (g *Generator) GenFile(ctx *cli.Context) (data []byte, targetDir string, ta
 	targetFile = pkg + ".arf.go"
 
 	g.requirePackage(
-		"github.com/arf-rpc/arf-go/arf",
-		"github.com/arf-rpc/arf-go/arf/status",
-		"github.com/arf-rpc/arf-go/arf/proto",
+		"github.com/arf-rpc/arf-go",
+		"github.com/arf-rpc/arf-go/status",
+		"github.com/arf-rpc/arf-go/proto",
 		"context",
 		"sync",
 	)
@@ -615,30 +615,30 @@ func (g *Generator) makeClient(s *ast.Service) {
 			g.w.Writelnf("opts = append(opts, arf.WithStream())")
 		}
 
-		g.w.Writelnf("req, err := x.c.Call(ctx, %q, %q, opts...)", g.t.Package+"/"+s.Name, m.Name)
+		g.w.Writelnf("_req, err := x.c.Call(ctx, %q, %q, opts...)", g.t.Package+"/"+s.Name, m.Name)
 
 		switch {
 		case !m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return err }")
-			g.w.Writelnf("_, err = req.Response().Result()")
+			g.w.Writelnf("_, err = _req.Response().Result()")
 			g.w.Writelnf("return err")
 		case !m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return nil, err }")
-			g.w.Writelnf("return arf.MakeInStream[%s](req), nil", common.MaybePointer(m.OutputStreamType))
+			g.w.Writelnf("return arf.MakeInStream[%s](_req), nil", common.MaybePointer(m.OutputStreamType))
 
 		case !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return nil, err }")
-			g.w.Writelnf("return arf.MakeOutStream[%s](req), nil", common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("return arf.MakeOutStream[%s](_req), nil", common.MaybePointer(m.InputStreamType))
 		case !m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return nil, err }")
-			g.w.Writelnf("return arf.MakeInOutStream[%s, %s](req), nil", common.MaybePointer(m.OutputStreamType), common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("return arf.MakeInOutStream[%s, %s](_req), nil", common.MaybePointer(m.OutputStreamType), common.MaybePointer(m.InputStreamType))
 		case m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
 				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
 			}
 			g.w.Writelnf(")")
-			g.w.Writelnf("params, err := req.Response().Result()")
+			g.w.Writelnf("params, err := _req.Response().Result()")
 			g.w.Writelnf("if err != nil {")
 			g.w.Writef("return ")
 			for i := range m.Output {
@@ -673,7 +673,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
 			}
 			g.w.Writelnf(")")
-			g.w.Writelnf("params, err := req.Response().Result()")
+			g.w.Writelnf("params, err := _req.Response().Result()")
 			g.w.Writelnf("if err != nil {")
 			g.w.Writef("return ")
 			for i := range m.Output {
@@ -701,14 +701,14 @@ func (g *Generator) makeClient(s *ast.Service) {
 			for idx := range m.Output {
 				g.w.Writef("r%d, ", idx)
 			}
-			g.w.Writelnf("arf.MakeInStream[%s](req), err", common.MaybePointer(m.OutputStreamType))
+			g.w.Writelnf("arf.MakeInStream[%s](_req), err", common.MaybePointer(m.OutputStreamType))
 		case m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
 				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
 			}
 			g.w.Writelnf(")")
-			g.w.Writelnf("params, err := req.Response().Result()")
+			g.w.Writelnf("params, err := _req.Response().Result()")
 			g.w.Writelnf("if err != nil {")
 			g.w.Writef("return ")
 			for i := range m.Output {
@@ -737,14 +737,14 @@ func (g *Generator) makeClient(s *ast.Service) {
 			for idx := range m.Output {
 				g.w.Writef("r%d, ", idx)
 			}
-			g.w.Writelnf("arf.MakeInStream[%s](req), err", common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("arf.MakeInStream[%s](_req), err", common.MaybePointer(m.InputStreamType))
 		case m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
 				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
 			}
 			g.w.Writelnf(")")
-			g.w.Writelnf("params, err := req.Response().Result()")
+			g.w.Writelnf("params, err := _req.Response().Result()")
 			g.w.Writelnf("if err != nil {")
 			g.w.Writef("return ")
 			for i := range m.Output {
@@ -772,7 +772,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 			for idx := range m.Output {
 				g.w.Writef("r%d, ", idx)
 			}
-			g.w.Writelnf("arf.MakeInOutStream[%s, %s](req), err", common.MaybePointer(m.OutputStreamType), common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("arf.MakeInOutStream[%s, %s](_req), err", common.MaybePointer(m.OutputStreamType), common.MaybePointer(m.InputStreamType))
 		}
 
 		g.w.Writelnf("}")
