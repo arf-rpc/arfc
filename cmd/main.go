@@ -51,6 +51,14 @@ func main() {
 					"be in the format some.package.name=package",
 				Category: "Go",
 			},
+			&cli.StringFlag{
+				Name: "go-module",
+				Usage: "When lang is set to \"go\", sets the base module name to be used in generated code. When unset, " +
+					"the compiler will try to locate a go.mod file in the output directory, and take the value from it. " +
+					"If unset, and no go module is present in the output directory, up to the disk root, the compiler " +
+					"emits an error and exits.",
+				Category: "Go",
+			},
 		},
 		Action: arf.Run,
 		Authors: []*cli.Author{

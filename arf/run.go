@@ -44,6 +44,9 @@ func Run(c *cli.Context) error {
 		if c.IsSet("golang-package") {
 			output.Warnf("Providing golang-package with lang Ruby has no effect")
 		}
+		if c.IsSet("golang-module") {
+			output.Warnf("Providing golang-module with lang Ruby has no effect")
+		}
 		makeGen = ruby.NewGenerator
 	case "go", "golang":
 		if c.IsSet("ruby-module") {

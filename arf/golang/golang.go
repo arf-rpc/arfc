@@ -10,6 +10,7 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -26,18 +27,83 @@ type Generator struct {
 
 	requiredPackages     []string
 	structuresToRegister []string
+	mod                  string
+	packageMapping       map[string]string
+	ctx                  *cli.Context
+}
+
+var goModRegexp = regexp.MustCompile("^module (.*)$")
+
+func (g *Generator) findGoMod() {
+	if mod := g.ctx.String("golang-module"); mod != "" {
+		g.mod = mod
+		return
+	}
+	outputPath := g.ctx.String("output")
+	abs, err := filepath.Abs(outputPath)
+	if err != nil {
+		output.Errorf("Cannot determine absolute path to %s: %s", outputPath, err.Error())
+		os.Exit(1)
+		return
+	}
+	components := strings.Split(abs, "/")
+	for len(components) > 1 {
+		modPath := "/" + filepath.Join(append(components, "go.mod")...)
+		data, err := os.ReadFile(modPath)
+		if err != nil {
+			components = components[:len(components)-1]
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			mod := goModRegexp.FindSubmatch([]byte(line))
+			if mod == nil {
+				continue
+			}
+			g.mod = string(mod[1])
+			return
+		}
+		output.Warnf("Invalid go.mod at %s: No module line found.", modPath)
+		components = components[:len(components)-1]
+	}
+
+	output.Errorf("Could not find a go.mod in the current tree, nor one was provided through the --go-module flag. Aborting...")
+	os.Exit(1)
+	return
+}
+
+func (g *Generator) resolvePackage(name string, packageName string) string {
+	// Ok, just need to figure out where packageName will be created based on
+	// modPath, and add it to the import list.
+	pathForPackage, ok := g.pathForPackage(packageName)
+	list := strings.Split(pathForPackage, "/")
+	if !ok {
+		list = strings.Split(packageName, ".")
+		g.requirePackage(g.mod + "/" + strings.Join(list, "/"))
+	} else {
+		g.requirePackage(g.mod + "/" + pathForPackage)
+	}
+
+	return list[len(list)-1]
+}
+
+func (g *Generator) pathForPackage(pkg string) (string, bool) {
+	if g.packageMapping == nil {
+		g.packageMapping = map[string]string{}
+		for _, m := range g.ctx.StringSlice("golang-package") {
+			comps := strings.SplitN(m, "=", 2)
+			g.packageMapping[strings.TrimSpace(comps[0])] = strings.TrimSpace(comps[1])
+		}
+	}
+	pkg, ok := g.packageMapping[pkg]
+	return pkg, ok
 }
 
 func (g *Generator) GenFile(ctx *cli.Context) (data []byte, targetDir string, targetFile string) {
-	packageMapping := map[string]string{}
-	for _, mod := range ctx.StringSlice("golang-package") {
-		comps := strings.SplitN(mod, "=", 2)
-		packageMapping[strings.TrimSpace(comps[0])] = strings.TrimSpace(comps[1])
-	}
-
+	g.ctx = ctx
+	g.findGoMod()
 	pkgComps := strings.Split(g.t.Package, ".")
 	pkg := pkgComps[len(pkgComps)-1]
-	if p, ok := packageMapping[g.t.Package]; ok {
+	if p, ok := g.pathForPackage(g.t.Package); ok {
 		pkg = p
 	}
 
@@ -79,7 +145,7 @@ func (g *Generator) GenFile(ctx *cli.Context) (data []byte, targetDir string, ta
 			output.Errorf("Failed to format generated file: %s. Failed to obtain temporary file to store source for inspection: %s", err, tmpErr)
 		}
 
-		_, tmpErr = tmpfile.Write(formatted)
+		_, tmpErr = tmpfile.Write([]byte(g.w.String()))
 		if tmpErr != nil {
 			_ = tmpfile.Close()
 			output.Errorf("Failed to format generated file: %s. Failed to write temporary file to store source for inspection: %s", err, tmpErr)
@@ -105,9 +171,16 @@ func (g *Generator) makeHeader(pkg string) *common.Writer {
 	w.Writelnf("")
 	w.Writelnf("import (")
 
+	imported := map[string]struct{}{}
+
 	for _, v := range g.requiredPackages {
+		if _, ok := imported[v]; ok {
+			continue
+		}
+		imported[v] = struct{}{}
 		w.Writelnf("%q", v)
 	}
+
 	w.Writelnf(")")
 	return w
 }
@@ -182,7 +255,7 @@ func (g *Generator) makeStruct(s *ast.Struct) {
 		}
 		g.w.Writelnf("%s %s `arf:\"%d\"`",
 			strcase.ToCamel(f.Name),
-			common.ConvertType(f.Type),
+			common.ConvertType(f.Type, g.resolvePackage),
 			f.ID)
 	}
 	g.w.Writelnf("}")
@@ -205,7 +278,7 @@ func (g *Generator) generateMethodResponder(m *common.MethodDefinition) {
 	g.w.Writelnf("arfc arf.Context")
 	g.w.Writelnf("}")
 	if m.HasInputStream {
-		g.w.Writelnf("func (x *%s) Recv() (v *%s, err error) {", name, common.ConvertType(m.InputStreamType))
+		g.w.Writelnf("func (x *%s) Recv() (v *%s, err error) {", name, common.ConvertType(m.InputStreamType, g.resolvePackage))
 		g.w.Writelnf("return")
 		g.w.Writelnf("}")
 	}
@@ -216,11 +289,11 @@ func (g *Generator) generateMethodResponder(m *common.MethodDefinition) {
 			if common.IsUserType(t) {
 				g.w.Writef("*")
 			}
-			g.w.Writef("%s,", common.ConvertType(t))
+			g.w.Writef("%s,", common.ConvertType(t, g.resolvePackage))
 		}
 		g.w.Writef(") (")
 		if m.HasResponder() {
-			g.w.Writef("out %s,", common.OutStreamer(m.OutputStreamType))
+			g.w.Writef("out %s,", common.OutStreamer(m.OutputStreamType, g.resolvePackage))
 		}
 		g.w.Writelnf("err error) {")
 		g.w.Writef("if err = x.arfc.SendResponse(status.OK, []any{")
@@ -232,7 +305,7 @@ func (g *Generator) generateMethodResponder(m *common.MethodDefinition) {
 		if common.IsUserType(m.OutputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s]", common.ConvertType(m.OutputStreamType))
+		g.w.Writef("%s]", common.ConvertType(m.OutputStreamType, g.resolvePackage))
 		g.w.Writelnf("(x.arfc)")
 		g.w.Writelnf("return")
 		g.w.Writelnf("}")
@@ -259,7 +332,7 @@ func (g *Generator) makeExecutor(m *common.MethodDefinition) {
 			if common.IsUserType(m.Inputs[i].Type) {
 				g.w.Writef("*")
 			}
-			g.w.Writef("%s) ", common.ConvertType(m.Inputs[i].Type))
+			g.w.Writef("%s) ", common.ConvertType(m.Inputs[i].Type, g.resolvePackage))
 		}
 	}
 	g.w.Writelnf("")
@@ -284,24 +357,24 @@ func (g *Generator) makeExecutor(m *common.MethodDefinition) {
 		if common.IsUserType(m.OutputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType, g.resolvePackage))
 	case !m.HasInput && !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 		g.w.Writef("arf.MakeInStream[")
 		if common.IsUserType(m.InputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.InputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.InputStreamType, g.resolvePackage))
 	case !m.HasInput && !m.HasOutput && m.HasInputStream && m.HasOutputStream:
 
 		g.w.Writef("arf.MakeInOutStream[")
 		if common.IsUserType(m.InputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s, ", common.ConvertType(m.InputStreamType))
+		g.w.Writef("%s, ", common.ConvertType(m.InputStreamType, g.resolvePackage))
 		if common.IsUserType(m.OutputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType, g.resolvePackage))
 	//case !m.HasInput && m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 	case !m.HasInput && m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 		g.w.Writef("_responder")
@@ -310,7 +383,7 @@ func (g *Generator) makeExecutor(m *common.MethodDefinition) {
 		if common.IsUserType(m.InputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.InputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.InputStreamType, g.resolvePackage))
 	case !m.HasInput && m.HasOutput && m.HasInputStream && m.HasOutputStream:
 		g.w.Writef("_responder,")
 	//case m.HasInput && !m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
@@ -319,23 +392,23 @@ func (g *Generator) makeExecutor(m *common.MethodDefinition) {
 		if common.IsUserType(m.OutputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType, g.resolvePackage))
 	case m.HasInput && !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 		g.w.Writef("arf.MakeInStream[")
 		if common.IsUserType(m.InputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.InputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.InputStreamType, g.resolvePackage))
 	case m.HasInput && !m.HasOutput && m.HasInputStream && m.HasOutputStream:
 		g.w.Writef("arf.MakeInOutStream[")
 		if common.IsUserType(m.InputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s, ", common.ConvertType(m.InputStreamType))
+		g.w.Writef("%s, ", common.ConvertType(m.InputStreamType, g.resolvePackage))
 		if common.IsUserType(m.OutputStreamType) {
 			g.w.Writef("*")
 		}
-		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType))
+		g.w.Writef("%s](c),", common.ConvertType(m.OutputStreamType, g.resolvePackage))
 	//case m.HasInput && m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 	case m.HasInput && m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 		g.w.Writef("_responder")
@@ -443,7 +516,7 @@ func (g *Generator) makeService(s *ast.Service) {
 		if ann := m.Method.Annotations.ByName("deprecated"); ann != nil {
 			g.w.Writelnf("Deprecated: %s", ann.Arguments[0])
 		}
-		m.BuildInterfaceSignature(g.w)
+		m.BuildInterfaceSignature(g.w, g.resolvePackage)
 	}
 	g.w.Writelnf("}")
 }
@@ -470,35 +543,35 @@ func (g *Generator) makeClient(s *ast.Service) {
 		case !m.HasInput && !m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("opts ...arf.CallOption) error {")
 		case !m.HasInput && !m.HasOutput && !m.HasInputStream && m.HasOutputStream:
-			g.w.Writef("opts ...arf.CallOption) (%s, error) {", common.InStreamer(m.OutputStreamType))
+			g.w.Writef("opts ...arf.CallOption) (%s, error) {", common.InStreamer(m.OutputStreamType, g.resolvePackage))
 		case !m.HasInput && !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
-			g.w.Writef("opts ...arf.CallOption) (%s, error) {", common.OutStreamer(m.InputStreamType))
+			g.w.Writef("opts ...arf.CallOption) (%s, error) {", common.OutStreamer(m.InputStreamType, g.resolvePackage))
 		case !m.HasInput && !m.HasOutput && m.HasInputStream && m.HasOutputStream:
-			g.w.Writef("opts ...arf.CallOption) (%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType))
+			g.w.Writef("opts ...arf.CallOption) (%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType, g.resolvePackage))
 		case !m.HasInput && m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, v := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(v))
+				g.w.Writef("%s, ", common.MaybePointer(v, g.resolvePackage))
 			}
 			g.w.Writelnf("error) {")
 		case !m.HasInput && m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, v := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(v))
+				g.w.Writef("%s, ", common.MaybePointer(v, g.resolvePackage))
 			}
-			g.w.Writelnf(" %s, error) {", common.InStreamer(m.OutputStreamType))
+			g.w.Writelnf(" %s, error) {", common.InStreamer(m.OutputStreamType, g.resolvePackage))
 		case !m.HasInput && m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, v := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(v))
+				g.w.Writef("%s, ", common.MaybePointer(v, g.resolvePackage))
 			}
-			g.w.Writelnf("%s, error) {", common.InStreamer(m.InputStreamType))
+			g.w.Writelnf("%s, error) {", common.InStreamer(m.InputStreamType, g.resolvePackage))
 		case !m.HasInput && m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, v := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(v))
+				g.w.Writef("%s, ", common.MaybePointer(v, g.resolvePackage))
 			}
-			g.w.Writelnf("%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType))
+			g.w.Writelnf("%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType, g.resolvePackage))
 		case m.HasInput && !m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			for idx, i := range m.Inputs {
 				if i.Name == "" {
@@ -506,7 +579,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
 			g.w.Writelnf("opts ...arf.CallOption) error {")
 		case m.HasInput && !m.HasOutput && !m.HasInputStream && m.HasOutputStream:
@@ -516,9 +589,9 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
-			g.w.Writelnf("opts ...arf.CallOption) (%s, error) {", common.InStreamer(m.OutputStreamType))
+			g.w.Writelnf("opts ...arf.CallOption) (%s, error) {", common.InStreamer(m.OutputStreamType, g.resolvePackage))
 		case m.HasInput && !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			for idx, i := range m.Inputs {
 				if i.Name == "" {
@@ -526,9 +599,9 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
-			g.w.Writelnf("opts ...arf.CallOption) (%s, error) {", common.OutStreamer(m.InputStreamType))
+			g.w.Writelnf("opts ...arf.CallOption) (%s, error) {", common.OutStreamer(m.InputStreamType, g.resolvePackage))
 		case m.HasInput && !m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			for idx, i := range m.Inputs {
 				if i.Name == "" {
@@ -536,9 +609,9 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
-			g.w.Writelnf("opts ...arf.CallOption) (%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType))
+			g.w.Writelnf("opts ...arf.CallOption) (%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType, g.resolvePackage))
 		case m.HasInput && m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			for idx, i := range m.Inputs {
 				if i.Name == "" {
@@ -546,11 +619,11 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, o := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(o))
+				g.w.Writef("%s, ", common.MaybePointer(o, g.resolvePackage))
 			}
 			g.w.Writelnf("error) {")
 
@@ -561,13 +634,13 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, o := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(o))
+				g.w.Writef("%s, ", common.MaybePointer(o, g.resolvePackage))
 			}
-			g.w.Writelnf("%s, error) {", common.InStreamer(m.OutputStreamType))
+			g.w.Writelnf("%s, error) {", common.InStreamer(m.OutputStreamType, g.resolvePackage))
 
 		case m.HasInput && m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			for idx, i := range m.Inputs {
@@ -576,13 +649,13 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, o := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(o))
+				g.w.Writef("%s, ", common.MaybePointer(o, g.resolvePackage))
 			}
-			g.w.Writelnf("%s, error) {", common.InStreamer(m.OutputStreamType))
+			g.w.Writelnf("%s, error) {", common.InStreamer(m.OutputStreamType, g.resolvePackage))
 		case m.HasInput && m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			for idx, i := range m.Inputs {
 				if i.Name == "" {
@@ -590,13 +663,13 @@ func (g *Generator) makeClient(s *ast.Service) {
 				} else {
 					g.w.Writef("%s ", i.Name)
 				}
-				g.w.Writef("%s, ", common.MaybePointer(i.Type))
+				g.w.Writef("%s, ", common.MaybePointer(i.Type, g.resolvePackage))
 			}
 			g.w.Writef("opts ...arf.CallOption) (")
 			for _, o := range m.Output {
-				g.w.Writef("%s, ", common.MaybePointer(o))
+				g.w.Writef("%s, ", common.MaybePointer(o, g.resolvePackage))
 			}
-			g.w.Writelnf("%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType))
+			g.w.Writelnf("%s, error) {", common.InOutStreamer(m.OutputStreamType, m.InputStreamType, g.resolvePackage))
 		}
 
 		if m.HasInput {
@@ -624,18 +697,18 @@ func (g *Generator) makeClient(s *ast.Service) {
 			g.w.Writelnf("return err")
 		case !m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return nil, err }")
-			g.w.Writelnf("return arf.MakeInStream[%s](_req), nil", common.MaybePointer(m.OutputStreamType))
+			g.w.Writelnf("return arf.MakeInStream[%s](_req), nil", common.MaybePointer(m.OutputStreamType, g.resolvePackage))
 
 		case !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return nil, err }")
-			g.w.Writelnf("return arf.MakeOutStream[%s](_req), nil", common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("return arf.MakeOutStream[%s](_req), nil", common.MaybePointer(m.InputStreamType, g.resolvePackage))
 		case !m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("if err != nil { return nil, err }")
-			g.w.Writelnf("return arf.MakeInOutStream[%s, %s](_req), nil", common.MaybePointer(m.OutputStreamType), common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("return arf.MakeInOutStream[%s, %s](_req), nil", common.MaybePointer(m.OutputStreamType, g.resolvePackage), common.MaybePointer(m.InputStreamType, g.resolvePackage))
 		case m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
-				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
+				g.w.Writelnf("r%d %s", i, common.MaybePointer(o, g.resolvePackage))
 			}
 			g.w.Writelnf(")")
 			g.w.Writelnf("params, err := _req.Response().Result()")
@@ -655,7 +728,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 			}
 			g.w.Writef("=")
 			for idx, o := range m.Output {
-				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o))
+				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o, g.resolvePackage))
 				if idx != len(m.Output)-1 {
 					g.w.Writef(",")
 				}
@@ -670,7 +743,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 		case m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
-				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
+				g.w.Writelnf("r%d %s", i, common.MaybePointer(o, g.resolvePackage))
 			}
 			g.w.Writelnf(")")
 			g.w.Writelnf("params, err := _req.Response().Result()")
@@ -690,7 +763,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 			}
 			g.w.Writef("=")
 			for idx, o := range m.Output {
-				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o))
+				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o, g.resolvePackage))
 				if idx != len(m.Output)-1 {
 					g.w.Writef(",")
 				}
@@ -701,11 +774,11 @@ func (g *Generator) makeClient(s *ast.Service) {
 			for idx := range m.Output {
 				g.w.Writef("r%d, ", idx)
 			}
-			g.w.Writelnf("arf.MakeInStream[%s](_req), err", common.MaybePointer(m.OutputStreamType))
+			g.w.Writelnf("arf.MakeInStream[%s](_req), err", common.MaybePointer(m.OutputStreamType, g.resolvePackage))
 		case m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
-				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
+				g.w.Writelnf("r%d %s", i, common.MaybePointer(o, g.resolvePackage))
 			}
 			g.w.Writelnf(")")
 			g.w.Writelnf("params, err := _req.Response().Result()")
@@ -725,7 +798,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 			}
 			g.w.Writef("=")
 			for idx, o := range m.Output {
-				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o))
+				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o, g.resolvePackage))
 				if idx != len(m.Output)-1 {
 					g.w.Writef(",")
 				}
@@ -737,11 +810,11 @@ func (g *Generator) makeClient(s *ast.Service) {
 			for idx := range m.Output {
 				g.w.Writef("r%d, ", idx)
 			}
-			g.w.Writelnf("arf.MakeInStream[%s](_req), err", common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("arf.MakeInStream[%s](_req), err", common.MaybePointer(m.InputStreamType, g.resolvePackage))
 		case m.HasOutput && m.HasInputStream && m.HasOutputStream:
 			g.w.Writelnf("var (")
 			for i, o := range m.Output {
-				g.w.Writelnf("r%d %s", i, common.MaybePointer(o))
+				g.w.Writelnf("r%d %s", i, common.MaybePointer(o, g.resolvePackage))
 			}
 			g.w.Writelnf(")")
 			g.w.Writelnf("params, err := _req.Response().Result()")
@@ -761,7 +834,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 			}
 			g.w.Writef("=")
 			for idx, o := range m.Output {
-				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o))
+				g.w.Writef("params[%d].(%s)", idx, common.MaybePointer(o, g.resolvePackage))
 				if idx != len(m.Output)-1 {
 					g.w.Writef(",")
 				}
@@ -772,7 +845,7 @@ func (g *Generator) makeClient(s *ast.Service) {
 			for idx := range m.Output {
 				g.w.Writef("r%d, ", idx)
 			}
-			g.w.Writelnf("arf.MakeInOutStream[%s, %s](_req), err", common.MaybePointer(m.OutputStreamType), common.MaybePointer(m.InputStreamType))
+			g.w.Writelnf("arf.MakeInOutStream[%s, %s](_req), err", common.MaybePointer(m.OutputStreamType, g.resolvePackage), common.MaybePointer(m.InputStreamType, g.resolvePackage))
 		}
 
 		g.w.Writelnf("}")

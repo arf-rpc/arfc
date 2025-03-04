@@ -8,8 +8,10 @@ import (
 	"strings"
 )
 
-func MaybePointer(t ast.Type) string {
-	str := ConvertType(t)
+type PackageResolver func(name string, typeName string) string
+
+func MaybePointer(t ast.Type, resolver PackageResolver) string {
+	str := ConvertType(t, resolver)
 	if IsUserType(t) {
 		str = "*" + str
 	}
@@ -21,7 +23,7 @@ func PackageName(t ast.Object) string {
 	return comps[len(comps)-1]
 }
 
-func ConvertType(t ast.Type) string {
+func ConvertType(t ast.Type, resolver PackageResolver) string {
 	switch v := t.(type) {
 	case *ast.PrimitiveType:
 		switch v.Name {
@@ -33,11 +35,11 @@ func ConvertType(t ast.Type) string {
 			return v.Name
 		}
 	case *ast.OptionalType:
-		return "*" + ConvertType(v.Type)
+		return "*" + ConvertType(v.Type, resolver)
 	case *ast.ArrayType:
-		return "[]" + ConvertType(v.Type)
+		return "[]" + ConvertType(v.Type, resolver)
 	case *ast.MapType:
-		return fmt.Sprintf("map[%s]%s", ConvertType(v.Key), ConvertType(v.Value))
+		return fmt.Sprintf("map[%s]%s", ConvertType(v.Key, resolver), ConvertType(v.Value, resolver))
 	case *ast.SimpleUserType:
 		switch a := v.ResolvedType.(type) {
 		case *ast.Enum:
@@ -48,11 +50,18 @@ func ConvertType(t ast.Type) string {
 			return "INVALID"
 		}
 	case *ast.FullQualifiedType:
+		prefix := ""
+		if resolver != nil {
+			p := resolver(v.Name, v.Package)
+			if p != "" {
+				prefix = p + "."
+			}
+		}
 		switch a := v.ResolvedType.(type) {
 		case *ast.Enum:
-			return EnumName(a)
+			return prefix + EnumName(a)
 		case *ast.Struct:
-			return StructName(a)
+			return prefix + StructName(a)
 		default:
 			return "INVALID"
 		}
@@ -121,23 +130,23 @@ type MethodDefinition struct {
 	Tree             *ast.PackageTree
 }
 
-func InStreamer(t ast.Type) string {
-	return fmt.Sprintf("arf.InStreamer[%s]", MaybePointer(t))
+func InStreamer(t ast.Type, resolver PackageResolver) string {
+	return fmt.Sprintf("arf.InStreamer[%s]", MaybePointer(t, resolver))
 }
-func OutStreamer(t ast.Type) string {
-	return fmt.Sprintf("arf.OutStreamer[%s]", MaybePointer(t))
+func OutStreamer(t ast.Type, resolver PackageResolver) string {
+	return fmt.Sprintf("arf.OutStreamer[%s]", MaybePointer(t, resolver))
 }
-func InOutStreamer(i, o ast.Type) string {
-	return fmt.Sprintf("arf.InOutStreamer[%s, %s]", MaybePointer(i), MaybePointer(o))
+func InOutStreamer(i, o ast.Type, resolver PackageResolver) string {
+	return fmt.Sprintf("arf.InOutStreamer[%s, %s]", MaybePointer(i, resolver), MaybePointer(o, resolver))
 }
 
 func (m *MethodDefinition) ResponderName() string {
 	return fmt.Sprintf("%s%sResponder", strcase.ToCamel(PackageName(m.Method)), strcase.ToCamel(m.Name))
 }
 
-func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
+func (m *MethodDefinition) BuildInterfaceSignature(w *Writer, resolver PackageResolver) {
 	isNamed := m.HasInput
-	
+
 	w.Writef("%s(", strcase.ToCamel(m.Name))
 	if isNamed {
 		w.Writef("ctx ")
@@ -147,23 +156,23 @@ func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
 	case !m.HasInput && !m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 		w.Writef(") error")
 	case !m.HasInput && !m.HasOutput && !m.HasInputStream && m.HasOutputStream:
-		w.Writef("%s,) error", OutStreamer(m.OutputStreamType))
+		w.Writef("%s,) error", OutStreamer(m.OutputStreamType, resolver))
 	case !m.HasInput && !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
-		w.Writef("%s, ) error", InStreamer(m.InputStreamType))
+		w.Writef("%s, ) error", InStreamer(m.InputStreamType, resolver))
 	case !m.HasInput && !m.HasOutput && m.HasInputStream && m.HasOutputStream:
-		w.Writef("%s,) error", InOutStreamer(m.InputStreamType, m.OutputStreamType))
+		w.Writef("%s,) error", InOutStreamer(m.InputStreamType, m.OutputStreamType, resolver))
 	case !m.HasInput && m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 		w.Writef(") (")
 		for _, o := range m.Output {
-			w.Writef("%s,", MaybePointer(o))
+			w.Writef("%s,", MaybePointer(o, resolver))
 		}
 		w.Writef("error)")
 	case !m.HasInput && m.HasOutput && !m.HasInputStream && m.HasOutputStream:
 		w.Writef("*%s) error", m.ResponderName())
 	case !m.HasInput && m.HasOutput && m.HasInputStream && !m.HasOutputStream:
-		w.Writef("%s,) (", InStreamer(m.InputStreamType))
+		w.Writef("%s,) (", InStreamer(m.InputStreamType, resolver))
 		for _, o := range m.Output {
-			w.Writef("%s,", MaybePointer(o))
+			w.Writef("%s,", MaybePointer(o, resolver))
 		}
 		w.Writef("error)")
 	case !m.HasInput && m.HasOutput && m.HasInputStream && m.HasOutputStream:
@@ -173,7 +182,7 @@ func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s, ", MaybePointer(i.Type))
+			w.Writef("%s, ", MaybePointer(i.Type, resolver))
 		}
 		w.Writef(") error")
 	case m.HasInput && !m.HasOutput && !m.HasInputStream && m.HasOutputStream:
@@ -181,44 +190,44 @@ func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s,", MaybePointer(i.Type))
+			w.Writef("%s,", MaybePointer(i.Type, resolver))
 		}
 		if isNamed {
 			w.Writef("outStream ")
 		}
-		w.Writef("%s) error", OutStreamer(m.OutputStreamType))
+		w.Writef("%s) error", OutStreamer(m.OutputStreamType, resolver))
 	case m.HasInput && !m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 		for _, i := range m.Inputs {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s,", MaybePointer(i.Type))
+			w.Writef("%s,", MaybePointer(i.Type, resolver))
 		}
 		if isNamed {
 			w.Writef("inStream ")
 		}
-		w.Writef("%s) error", InStreamer(m.InputStreamType))
+		w.Writef("%s) error", InStreamer(m.InputStreamType, resolver))
 	case m.HasInput && !m.HasOutput && m.HasInputStream && m.HasOutputStream:
 		for _, i := range m.Inputs {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s,", MaybePointer(i.Type))
+			w.Writef("%s,", MaybePointer(i.Type, resolver))
 		}
 		if isNamed {
 			w.Writef("inOutStream ")
 		}
-		w.Writef("%s) error", InOutStreamer(m.InputStreamType, m.OutputStreamType))
+		w.Writef("%s) error", InOutStreamer(m.InputStreamType, m.OutputStreamType, resolver))
 	case m.HasInput && m.HasOutput && !m.HasInputStream && !m.HasOutputStream:
 		for _, i := range m.Inputs {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s,", MaybePointer(i.Type))
+			w.Writef("%s,", MaybePointer(i.Type, resolver))
 		}
 		w.Writef(")(")
 		for _, o := range m.Output {
-			w.Writef("%s,", MaybePointer(o))
+			w.Writef("%s,", MaybePointer(o, resolver))
 		}
 		w.Writef("error)")
 	case m.HasInput && m.HasOutput && !m.HasInputStream && m.HasOutputStream:
@@ -226,7 +235,7 @@ func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s, ", MaybePointer(i.Type))
+			w.Writef("%s, ", MaybePointer(i.Type, resolver))
 		}
 		if isNamed {
 			w.Writef("responder ")
@@ -235,7 +244,7 @@ func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
 	case m.HasInput && m.HasOutput && m.HasInputStream && !m.HasOutputStream:
 		for _, i := range m.Inputs {
 			if isNamed {
-				w.Writef("%s %s,", i.Name, MaybePointer(i.Type))
+				w.Writef("%s %s,", i.Name, MaybePointer(i.Type, resolver))
 			}
 		}
 		w.Writef("*%s) error", m.ResponderName())
@@ -244,7 +253,7 @@ func (m *MethodDefinition) BuildInterfaceSignature(w *Writer) {
 			if isNamed {
 				w.Writef("%s ", i.Name)
 			}
-			w.Writef("%s, ", MaybePointer(i.Type))
+			w.Writef("%s, ", MaybePointer(i.Type, resolver))
 		}
 		if isNamed {
 			w.Writef("responder ")
