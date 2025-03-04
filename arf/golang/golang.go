@@ -111,10 +111,7 @@ func (g *Generator) GenFile(ctx *cli.Context) (data []byte, targetDir string, ta
 	targetFile = pkg + ".arf.go"
 
 	g.requirePackage(
-		"github.com/arf-rpc/arf-go",
-		"github.com/arf-rpc/arf-go/status",
 		"github.com/arf-rpc/arf-go/proto",
-		"context",
 		"sync",
 	)
 
@@ -269,6 +266,9 @@ func (g *Generator) makeStruct(s *ast.Struct) {
 
 func (g *Generator) generateMethodResponder(m *common.MethodDefinition) {
 	name := m.ResponderName()
+	g.requirePackage("github.com/arf-rpc/arf-go")
+	g.requirePackage("github.com/arf-rpc/arf-go/status")
+	g.requirePackage("context")
 	g.w.Writelnf("func make%s(ctx context.Context, c arf.Context) *%s {", name, name)
 	g.w.Writelnf("return &%s{make(chan error), ctx, c}", name)
 	g.w.Writelnf("}")
@@ -313,6 +313,7 @@ func (g *Generator) generateMethodResponder(m *common.MethodDefinition) {
 }
 
 func (g *Generator) makeExecutor(m *common.MethodDefinition) {
+	g.requirePackage("github.com/arf-rpc/arf-go/status")
 	g.w.Writelnf("func(ctx context.Context, c arf.Context) error {")
 	if m.HasInput {
 		g.w.Writelnf("_req := c.Request()")
@@ -482,6 +483,9 @@ func (g *Generator) makeDefinition(m *ast.ServiceMethod) *common.MethodDefinitio
 }
 
 func (g *Generator) makeService(s *ast.Service) {
+	g.requirePackage("github.com/arf-rpc/arf-go")
+	g.requirePackage("context")
+
 	g.w.Writelnf("func Register%s(s arf.Server, i %s) error {", s.Name, s.Name)
 	g.w.Writelnf("__arfRegister%sStructures()", composedPackage(g.t.Package))
 	g.w.Writelnf("return s.RegisterService(arf.ServiceAdapter{")
@@ -522,6 +526,8 @@ func (g *Generator) makeService(s *ast.Service) {
 }
 
 func (g *Generator) makeClient(s *ast.Service) {
+	g.requirePackage("github.com/arf-rpc/arf-go")
+	g.requirePackage("context")
 	g.w.Writelnf("func New%sClient(c arf.Client) *%sClient {", s.Name, s.Name)
 	g.w.Writelnf("__arfRegister%sStructures()", composedPackage(g.t.Package))
 	g.w.Writelnf("return &%sClient{c: c}", s.Name)
