@@ -1,0 +1,24 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+arch="$(uname -m)"
+if [[ "$arch" == "x86_64" ]]; then
+	arch="amd64"
+elif [[ "$arch" == "aarch64" ]]; then
+	arch="arm64"
+fi
+
+os="$(uname -s)"
+if [[ "$os" == "Darwin" ]]; then
+	os="darwin"
+elif [[ "$os" == "Linux" ]]; then
+	os="linux"
+fi
+
+latest_version=$(curl "https://raw.githubusercontent.com/arf-rpc/arfc/refs/heads/master/version.txt")
+curl -sSL https://github.com/arf-rpc/arfc/releases/download/$latest_version/arfc-$os-$arch > arfc
+chmod +x arfc
+mv arfc /usr/local/bin || {
+	echo -e "\nUnable to move arfc to /usr/local/bin. You may need to do that manually.\n"
+}
