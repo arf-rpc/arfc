@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+rm -rfv dist
+version="$(cat version.txt)"
+
+function build() {
+	export GOOS="$1"
+	export GOARCH="$2"
+	go build -o dist/arfc-$GOOS-$GOARCH ./cmd/main.go
+	echo "Built: dist/arfc-$GOOS-$GOARCH"
+}
+
+build "darwin" "amd64"
+build "darwin" "arm64"
+build "linux"  "amd64"
+build "linux"  "arm64"
