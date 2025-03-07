@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+    - name: Download mods
+      run: go mod download
+
+    - name: Test
+      run: go test -v ./...
+
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+      - run: GOOS=linux GOARCH=amd64 go build -o arfc-linux-amd64 ./cmd/main.go
+      - run: GOOS=linux GOARCH=arm64 go build -o arfc-linux-arm64 ./cmd/main.go
+      - run: GOOS=darwin GOARCH=amd64 go build -o arfc-darwin-amd64 ./cmd/main.go
+      - run: GOOS=darwin GOARCH=arm64 go build -o arfc-darwin-amd64 ./cmd/main.go
