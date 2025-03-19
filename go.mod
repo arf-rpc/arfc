@@ -3,8 +3,8 @@ module github.com/arf-rpc/arfc
 go 1.23.6
 
 require (
-	github.com/arf-rpc/idl v0.1.2
-	github.com/urfave/cli/v2 v2.27.5
+	github.com/arf-rpc/idl v0.1.3
+	github.com/urfave/cli/v2 v2.27.6
 )
 
 require (
